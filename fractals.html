@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Fractal Demo</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/9.4.4/math.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.0/papaparse.min.js"></script>
+</head>
+
+<body>
+    <div id="iteration"></div>
+    <div id="frameTime"></div>
+    <div id="eta"></div>
+    <canvas id="cnv" width="2000" height="2000"></canvas>
+
+    <script src="fractals_main.js"></script>
+    <script src="fractals.js"></script>
+    <script src="fractals_worker.js"></script>
+
+    <script id="statevectors">
+        const statevectors = [
+            [math.complex(-0.056132115816913343, -0.24863047384206843),
+            math.complex(-0.026132115816913395, 0.2486304738420684),
+            math.complex(-0.02613211581691334, -0.2486304738420684),
+            math.complex(-0.02613211581691339, 0.24863047384206835),
+            math.complex(-0.02613211581691334, -0.2486304738420684),
+            math.complex(-0.02613211581691339, 0.24863047384206835),
+            math.complex(-0.026132115816913336, -0.24863047384206835),
+            math.complex(-0.026132115816913385, 0.24863047384206832),
+            math.complex(-0.02613211581691334, -0.2486304738420684),
+            math.complex(-0.02613211581691339, 0.24863047384206835),
+            math.complex(-0.026132115816913336, -0.24863047384206835),
+            math.complex(-0.026132115816913385, 0.24863047384206832),
+            math.complex(-0.026132115816913336, -0.24863047384206835),
+            math.complex(-0.026132115816913385, 0.24863047384206832),
+            math.complex(-0.02613211581691333, -0.24863047384206832),
+            math.complex(-0.02613211581691338, 0.2486304738420683)]
+        ]
+    </script>
+
+    <script>
+        var ctx = cnv.getContext("2d");
+        const size = 25
+        var data = ctx.createImageData(size * statevectors.length, size);
+        var buf = new Uint32Array(data.data.buffer);
+
+        //minimun 10 iterations required
+        let iterations = 20
+        let currentIteration = 0
+        let fractals = []
+        let ms = []
+        let zArrs = []
+        function generateFractal() {
+            let start = Date.now();
+            const multithread = statevectors.length > 1 ? true : false;
+
+            if (multithread) {
+                // Create a new Web Worker
+                const numWorkers = statevectors.length;
+
+                const workerScript = `
+                importScripts('https://cdnjs.cloudflare.com/ajax/libs/mathjs/9.4.4/math.js');
+
+                // Listen for messages from the main thread
+self.onmessage = function(event) {
+    // Get the input data from the message
+    const { statevector_data,j, div_time, m, zArr, size, max_iterations } = event.data;
+    
+    const [div_timeResult,mResult,zArrResult] = calcFractal(statevector_data,j, div_time, m, zArr, size, max_iterations)
+    // Send the result back to the main thread
+    self.postMessage({fractal: div_timeResult, m: mResult, zArr: zArrResult});
+};
+
+function createFraction(nSubExpressions, isNumerator, powers, indices) {
+    const power_offset = 0;
+    if (isNumerator) {
+        powers.push(nSubExpressions + power_offset);
+        indices.push((nSubExpressions - 1) * 2);
+    } else {
+        powers.push(nSubExpressions + power_offset);
+        indices.push(((nSubExpressions - 1) * 2) + 1);
+    }
+    if (nSubExpressions - 1 > 0) {
+        return createFraction(nSubExpressions - 1, isNumerator, powers, indices);
+    } else {
+        return [powers, indices];
+    }
+}
+
+function create_formula(n_sub_expressions) {
+    let upper_pwrs = [];
+    let upper_idxs = [];
+    let lower_pwrs = [];
+    let lower_idxs = [];
+
+    [upper_pwrs, upper_idxs] = createFraction(n_sub_expressions, true, [], []);
+    [lower_pwrs, lower_idxs] = createFraction(n_sub_expressions, false, [], []);
+
+    return [upper_pwrs, upper_idxs, lower_pwrs, lower_idxs];
+}
+
+function julia_set_jit(statevector_data, max_iterations, n_sub_expressions, upper_pwrs, upper_idxs, lower_pwrs, lower_idxs, height, width, x = 0, y = 0, zoom = 1) {
+    // To make navigation easier we calculate these values
+
+    const xWidth = 1.5;
+    const xFrom = x - xWidth / zoom;
+    const xTo = x + xWidth / zoom;
+
+    const yHeight = 1.5 * height / width;
+    const yFrom = y - yHeight / zoom;
+    const yTo = y + yHeight / zoom;
+
+    //Here the actual algorithm starts and the z parameter is defined for the Julia set function
+    const xArr = Array.from({ length: width }, (_, i) => xFrom + i * (xTo - xFrom) / (width - 1));
+    const yArr = Array.from({ length: height }, (_, i) => yFrom + i * (yTo - yFrom) / (height - 1));
+
+    let zArr = Array.from({ length: height });
+    for (let i = 0; i < height; i++) {
+        zArr[i] = Array.from({ length: width });
+        for (let j = 0; j < width; j++) {
+            zArr[i][j] = math.complex(xArr[j], yArr[i]);
+        }
+    }
+
+    // To keep track in which iteration the point diverged
+    let div_time = new Array(height);
+    for (let i = 0; i < height; i++) {
+        div_time[i] = new Array(width).fill(max_iterations - 1);
+    }
+    // To keep track on which points did not converge so far
+    let m = new Array(height);
+    for (let i = 0; i < height; i++) {
+        m[i] = new Array(width).fill(true);
+    }
+
+    return fractalRecursion(0, div_time, m, zArr, statevector_data, n_sub_expressions, upper_pwrs, upper_idxs, lower_pwrs, lower_idxs, height, width, max_iterations)
+}
+
+
+
+//main function
+function calcFractal(statevector_data,j, div_time, m, zArr, size, max_iterations) {
+    /*const dpino = 50; // 300 // 1200 // 300 for high res plotting
+    const figuresize = 10; // 40 // 20 
+    const size = figuresize * dpino; // 6000 // 1000 // figsize=20 x 20 with dpi=300 -> size = 20x300=6000*/
+    const height = size;
+    const width = size;
+
+
+    const [n_sub_expressions, upper_pwrs, upper_idxs, lower_pwrs, lower_idxs] = loadStateVectorParameters(statevector_data)
+
+
+
+    //determines if its the initial phase or the recursive phase.
+    const [div_timeResult, mResult, zArrResult] = j == 0 ? julia_set_jit(statevector_data, max_iterations, n_sub_expressions, upper_pwrs, upper_idxs, lower_pwrs, lower_idxs, height, width) : fractalRecursion(j, div_time, m, zArr, statevector_data, n_sub_expressions, upper_pwrs, upper_idxs, lower_pwrs, lower_idxs, height, width, max_iterations)
+    return [div_timeResult, mResult, zArrResult];
+}
+
+
+function fractalRecursion(j, div_time, m, zArr, statevector_data, n_sub_expressions, upper_pwrs, upper_idxs, lower_pwrs, lower_idxs, height, width, max_iterations) {
+    const upper_pwrs_slice = upper_pwrs.slice();
+    const lower_pwrs_slice = lower_pwrs.slice();
+    const upper_idxs_slice = upper_idxs.slice();
+    const lower_idxs_slice = lower_idxs.slice();
+    const escapeno = 2;
+
+    for (let x = 0; x < width; x++) {
+        for (let y = 0; y < height; y++) {
+            if (m[x][y]) {
+                const z = math.complex(zArr[x][y])
+                // Create first sub-equation of Julia mating equation
+                let uval = math.pow(z, upper_pwrs[0])
+                let lval = math.pow(z, lower_pwrs[0])
+                //Add middle sub-equation(s) of Julia mating equation
+                for (let i = 0; i < n_sub_expressions - 1; i++) {
+                    uval = math.add(uval, math.multiply(math.complex(statevector_data[upper_idxs_slice[i]]), math.pow(z, upper_pwrs_slice[i + 1])))
+                    lval = math.add(lval, math.multiply(math.complex(statevector_data[lower_idxs_slice[i]]), math.pow(z, lower_pwrs_slice[i + 1])))
+                }
+                // Add final sub-equation of Julia mating equation
+                uval = math.add(uval, math.complex(statevector_data[upper_idxs_slice[n_sub_expressions - 1]]));
+                lval = math.add(lval, math.complex(statevector_data[lower_idxs_slice[n_sub_expressions - 1]]));
+                zArr[x][y] = math.divide(uval, lval);
+                if (math.abs(zArr[x][y]) > escapeno) {
+                    m[x][y] = false;
+                    div_time[x][y] = j;
+                }
+
+            }
+        }
+    }
+    return [div_time, m, zArr]
+}
+
+//loads the statevector 
+function loadStateVectorParameters(statevector_data) {
+    number_of_qubits = math.log2(statevector_data.length)
+    console.log("number of qubits detected in statevector: ", number_of_qubits)
+    if (!Number.isInteger(number_of_qubits)) { throw new Error('invalid statevector size, should be log2(n) = integer, statevector size = ', statevector_data.length) }
+    let n_sub_expressions;
+    if (number_of_qubits === 1) {
+        n_sub_expressions = number_of_qubits;
+    } else {
+        n_sub_expressions = (2 ** number_of_qubits) / 2;
+    }
+
+    // Calculate the powers and indexes
+    [upper_pwrs, upper_idxs, lower_pwrs, lower_idxs] = create_formula(n_sub_expressions);
+
+    return [n_sub_expressions, upper_pwrs, upper_idxs, lower_pwrs, lower_idxs]
+}
+
+
+
+//checks if 2 statevectors are equal
+function isStatevectorsEqual(statevector1, statevector2) {
+    if (statevector1.length != statevector2.length) { return false }
+    for (let i = 0; i < statevector1.length; i++) {
+        if (statevector1[i].re != statevector2[i].re) { return false }
+        if (statevector1[i].im != statevector2[i].im) { return false }
+    }
+    return true;
+}`
+
+
+                //let result = 0;
+                let workersFinished = 0;
+                for (let i = 0; i < numWorkers; i++) {
+                    const workerBlob = new Blob([workerScript], { type: 'text/javascript' });
+                    const workerUrl = URL.createObjectURL(workerBlob);
+                    const worker = new Worker(workerUrl);
+                    //const worker = new Worker('./fractals_worker.js');
+                    console.log("worker created")
+                    worker.addEventListener('message', (event) => {
+                        const { fractal, m, zArr } = event.data;
+                        fractals[i] = fractal;
+                        ms[i] = m
+                        zArrs[i] = zArr
+                        workersFinished++;
+                        if (workersFinished === numWorkers) {
+                            console.log('workers done');
+                            var startTime = performance.now()
+
+                            const image = []
+                            fractals.forEach((f) => {
+                                image.push(...transpose(f))
+                            })
+
+                            draw(image, image[0].length, image.length);
+                            ctx.putImageData(data, 0, 0);
+                            console.log(`draw took ${performance.now() - startTime} milliseconds`)
+                            currentIteration++;
+                            iteration.innerText = "Fractal iteration:" + currentIteration + "/" + iterations;
+
+                            if (currentIteration === iterations) {
+                                return;
+                            }
+                            eta.innerText = "Estimated completion time:" + ((Date.now() - start) / 1000) * iterations + "s";
+                            frameTime.innerText = "Frame time:" + ((Date.now() - start) / 1000) + "s";
+                            setTimeout(generateFractal, 1);
+                        }
+                    });
+
+                    worker.postMessage({ statevector_data: statevectors[i], j: currentIteration, div_time: fractals[i], m: ms[i], zArr: zArrs[i], size: size, max_iterations: iterations });
+                }
+            } else {
+
+                for (let i = 0; i < statevectors.length; i++) {
+                    const [fractal, m, zArr] = calcFractal(statevectors[i], currentIteration, fractals[i], ms[i], zArrs[i], size, iterations);
+                    fractals[i] = fractal;
+                    ms[i] = m
+                    zArrs[i] = zArr
+                }
+                var startTime = performance.now()
+
+                const image = []
+                fractals.forEach((f) => {
+                    image.push(...transpose(f))
+                })
+
+                draw(image, image[0].length, image.length);
+                ctx.putImageData(data, 0, 0);
+                console.log(`draw took ${performance.now() - startTime} milliseconds`)
+                currentIteration++;
+                iteration.innerText = "Fractal iteration:" + currentIteration + "/" + iterations;
+
+                if (currentIteration === iterations) {
+                    return;
+                }
+                eta.innerText = "Estimated completion time:" + ((Date.now() - start) / 1000) * iterations + "s";
+                frameTime.innerText = "Frame time:" + ((Date.now() - start) / 1000) + "s";
+                setTimeout(generateFractal, 1);
+            }
+        }
+        generateFractal();
+
+        function draw(image, height, width) {
+            var i = 0;
+            for (var y = 0; y < height; y++)
+                for (var x = 0; x < width; x++) {
+                    var d1 = image[x][y]
+                    buf[i++] = d1 < math.ceil((iterations / 10) * 1) ? 0xFF000000 :
+                        (d1 < math.ceil((iterations / 10) * 2) ? 0xFF00003F :
+                            (d1 < math.ceil((iterations / 10) * 3) ? 0xFF000060 :
+                                (d1 < math.ceil((iterations / 10) * 4) ? 0xFF000090 :
+                                    (d1 < math.ceil((iterations / 10) * 5) ? 0xFF0000AA :
+                                        (d1 < math.ceil((iterations / 10) * 6) ? 0xFF005AAA :
+                                            (d1 < math.ceil((iterations / 10) * 7) ? 0xFF0091AA :
+                                                (d1 < math.ceil((iterations / 10) * 8) ? 0xFF00AA42 :
+                                                    (d1 < math.ceil((iterations / 10) * 9) ? 0xFFAA2000 : 0xFFFFFFF0))))))));
+                }
+        }
+
+
+        function transpose(arr) {
+            const result = [];
+            for (let i = 0; i < arr[0].length; i++) {
+                result[i] = [];
+                for (let j = 0; j < arr.length; j++) {
+                    result[i][j] = arr[j][i];
+                }
+            }
+            return result;
+        }
+
+
+    </script>
+
+
+
+</body>
+
+</html>
